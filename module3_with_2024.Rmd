@@ -1,0 +1,569 @@
+---
+title: "Module 3"
+author: "Sara Padula"
+date: "2025-05-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project Goals
+
+- Compare diet composition between black-capped and mountain chickadees.
+- Assess how diet varies across years (2019, 2020, 2024) and elevation.
+- Visualize dietary overlap using trees and ordination.
+- Model variation in diet richness by species, year, and elevation.
+
+```{r}
+
+## ---- Load libraries ----
+library(dplyr)
+library(tidyr)
+library(vegan)
+library(ape)
+library(ggplot2)
+library(ggtree)
+
+# ---- Load ColData and all ESVs ----
+
+col_data <- read.csv("ColData.csv", header = TRUE)
+esv.2024 <- read.csv("JVB4821-ArthCOI-read-data.csv", header = TRUE, check.names = FALSE)
+esv.2019.raw <- read.csv("ESV_Long_2019_Ind.csv", header = TRUE, check.names = FALSE)
+esv.2020.raw <- read.csv("ESV_Long_2020_Ind.csv", header = TRUE, check.names = FALSE)
+
+# ---- Helper function to process ESV data ----
+
+process_esv <- function(raw_esv) {
+  # Get all columns except the first (assumed to be ESV ID)
+  sample_cols <- names(raw_esv)[-1]
+  
+  # Create valid column names from ESV IDs
+  esv_ids <- make.names(raw_esv[[1]], unique = TRUE)
+  
+  # Transpose and label
+  transposed <- setNames(data.frame(t(raw_esv[, sample_cols])), esv_ids)
+  rownames(transposed) <- sample_cols
+  
+  # Clean values
+  transposed <- transposed %>% mutate(across(everything(), ~as.numeric(.)))
+  transposed[is.na(transposed)] <- 0
+  
+  # Filter empty samples and create binary matrix
+  trans_clean <- transposed[rowSums(transposed) > 0, ]
+  bin_matrix <- (trans_clean > 0) * 1
+  
+  return(list(trans = transposed, clean = trans_clean, bin = bin_matrix))
+}
+
+
+
+# ---- Process ESV data for each year ----
+
+# 2019
+esv.2019.proc <- process_esv(esv.2019.raw)
+esv.2019.trans <- esv.2019.proc$trans
+esv.2019.trans.clean <- esv.2019.proc$clean
+esv.2019.bin <- esv.2019.proc$bin
+
+# 2020
+esv.2020.proc <- process_esv(esv.2020.raw)
+esv.2020.trans <- esv.2020.proc$trans
+esv.2020.trans.clean <- esv.2020.proc$clean
+esv.2020.bin <- esv.2020.proc$bin
+
+# 2024
+sample_cols_2024 <- names(esv.2024)[grepl("^S\\d+", names(esv.2024))]
+esv.2024.trans <- setNames(data.frame(t(esv.2024[, sample_cols_2024])), esv.2024$ESVId)
+rownames(esv.2024.trans) <- gsub("^X", "", rownames(esv.2024.trans))
+rownames(esv.2024.trans) <- trimws(rownames(esv.2024.trans))
+esv.2024.trans <- esv.2024.trans %>% mutate(across(everything(), ~as.numeric(.)))
+esv.2024.trans[is.na(esv.2024.trans)] <- 0
+esv.2024.bin <- (esv.2024.trans > 0) * 1
+
+# ---- Clean and match metadata ----
+
+# Clean ColData SampleIDs
+col_data$SampleID <- gsub("\\.1$", "", col_data$SampleID)
+col_data$SampleID <- gsub("^S", "", col_data$SampleID)
+col_data$SampleID <- gsub(" ", "", col_data$SampleID)
+
+# 2024 metadata
+sample_ids_clean <- gsub("\\.1$", "", gsub("^S", "", rownames(esv.2024.trans)))
+meta.2024 <- col_data %>%
+  filter(Year == 2024, SampleID %in% sample_ids_clean)
+meta.2024$SampleID <- paste0("S", meta.2024$SampleID, ".1")
+rownames(meta.2024) <- meta.2024$SampleID
+stopifnot(all(rownames(meta.2024) %in% rownames(esv.2024.trans)))
+
+# 2019 metadata
+sample_ids_2019 <- rownames(esv.2019.trans)
+meta.2019 <- col_data %>% filter(Year == 2019, SampleID %in% sample_ids_2019)
+rownames(meta.2019) <- meta.2019$SampleID
+stopifnot(all(rownames(meta.2019) %in% rownames(esv.2019.trans)))
+
+# 2020 metadata
+sample_ids_2020 <- rownames(esv.2020.trans)
+meta.2020 <- col_data %>% filter(Year == 2020, SampleID %in% sample_ids_2020)
+rownames(meta.2020) <- meta.2020$SampleID
+stopifnot(all(rownames(meta.2020) %in% rownames(esv.2020.trans)))
+
+
+```
+
+## Tree-Based Clustering (Jaccard)
+
+```{r jaccard-trees}
+# Jaccard distances
+jaccard.2019 <- dist(esv.2019.bin, method = "binary")
+jaccard.2020 <- dist(esv.2020.bin, method = "binary")
+jaccard.2024 <- dist(esv.2024.bin, method = "binary")
+
+# Neighbor-joining trees
+tree.2019 <- nj(jaccard.2019)
+tree.2020 <- nj(jaccard.2020)
+tree.2024 <- nj(jaccard.2024)
+
+options(ignore.negative.edge = TRUE)
+
+# Plots
+p1 <- ggtree(tree.2019) %<+% meta.2019 +
+  geom_tippoint(aes(color = Species)) +
+  labs(title = "Jaccard Tree - 2019") +
+  scale_color_manual(values = c("rosybrown2", "cornflowerblue"))
+
+p2 <- ggtree(tree.2020) %<+% meta.2020 +
+  geom_tippoint(aes(color = Species)) +
+  labs(title = "Jaccard Tree - 2020") +
+  scale_color_manual(values = c("rosybrown2", "cornflowerblue"))
+
+# Ensure rownames in meta match those in esv.2024.bin
+rownames(meta.2024) <- meta.2024$SampleID
+
+# Rebuild Jaccard tree
+jaccard.2024 <- dist(esv.2024.bin, method = "binary")
+tree.2024 <- nj(jaccard.2024)
+
+# Plot with metadata joined and color by Species
+p3 <- ggtree(tree.2024) %<+% meta.2024 +
+  geom_tippoint(aes(color = Species)) +
+  labs(title = "Jaccard Tree - 2024") +
+  scale_color_manual(values = c("rosybrown2", "cornflowerblue"))
+
+print(p1); print(p2); print(p3)
+```
+
+Jaccard tree interpretation:
+Each tip of the tree = one nest's diet... nests are grouped based on how similar the insects in their fecal samples were
+
+2019
+-fewer samples overall
+-BCCH and MOCh diets are somewhat mixed but show some species-specific clustering
+-a good baseline for comparison
+
+2020
+-more samples than 2019
+-a lot of spread... nest diets varied a lot across individuals
+a few samples have missing species metadata
+
+2024
+-stronger clustering by species than in 2020
+-many MOCh samples group together, suggesting they were eating similar things
+-BCChs appear mostly in a separate bunch, which could point to species-level differences in diet
+
+## NMDS Ordination (Bray-Curtis)
+
+```{r nmds-ordination}
+# Clean 2020 of empty rows
+esv.2020.trans.clean <- esv.2020.trans[rowSums(esv.2020.trans) > 0, ]
+meta.2020.clean <- meta.2020 %>% filter(SampleID %in% rownames(esv.2020.trans.clean))
+
+# Distances
+bray.2019 <- vegdist(esv.2019.trans, method = "bray")
+bray.2020 <- vegdist(esv.2020.trans.clean, method = "bray")
+bray.2024 <- vegdist(esv.2024.trans, method = "bray")
+
+# NMDS
+nmds.2019 <- metaMDS(bray.2019, k = 2)
+nmds.2020 <- metaMDS(bray.2020, k = 2)
+nmds.2024 <- metaMDS(bray.2024, k = 2)
+
+# Dataframes
+nmds_df_2019 <- data.frame(nmds.2019$points, SampleID = rownames(nmds.2019$points)) %>%
+  left_join(meta.2019, by = "SampleID")
+
+nmds_df_2020 <- data.frame(nmds.2020$points, SampleID = rownames(nmds.2020$points)) %>%
+  left_join(meta.2020.clean, by = "SampleID")
+
+nmds_df_2024 <- data.frame(nmds.2024$points, SampleID = rownames(nmds.2024$points)) %>%
+  left_join(meta.2024, by = "SampleID")
+
+# Plots
+ggplot(nmds_df_2019, aes(MDS1, MDS2, color = Species)) +
+  geom_point(size = 3) + theme_classic() +
+  labs(title = "NMDS - 2019") +
+  scale_color_manual(values = c("rosybrown2", "cornflowerblue"))
+
+ggplot(nmds_df_2020, aes(MDS1, MDS2, color = Species)) +
+  geom_point(size = 3) + theme_classic() +
+  labs(title = "NMDS - 2020") +
+  scale_color_manual(values = c("rosybrown2", "cornflowerblue"))
+
+ggplot(nmds_df_2024, aes(MDS1, MDS2, color = Species)) +
+  geom_point(size = 3) + theme_classic() +
+  labs(title = "NMDS - 2024") +
+  scale_color_manual(values = c("rosybrown2", "cornflowerblue"))
+```
+
+What the NMDS Plots Show
+
+Each dot = a nest. Nests close together had more similar diets (based on insect DNA in the feces). Dots further apart = more different diets.
+
+2019
+-patterns are hard to see
+-large distances between dots might suggest high variability, or just low sample size
+
+2020
+-no strong clustering by species
+-both MOCH and BCCH are spread out and overlap a lot
+-diets in 2020 were highly variable, and species may have been eating similar things
+-possibly higher food diversity or less competition in this year
+
+2024
+-clear separation between MOCH and BCCH diets
+-MOCH diets are tightly clustered --> many individuals eat similar prey
+-BCCH diets are more spread out --> more diet variety
+-Suggests species may be specializng on different insect groups
+
+## Load Libraries
+
+```{r}
+library(phyloseq)
+library(vegan)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+```
+
+### ------- Alpha Diversity -------
+```{r}
+library(phyloseq)
+
+### ----- 2019 ----- ###
+# Set rownames for metadata
+rownames(meta.2019) <- meta.2019$SampleID
+
+# Keep only metadata rows that match the ESV table
+meta.2019.filtered <- meta.2019[rownames(esv.2019.bin), , drop = FALSE]
+
+# Construct phyloseq object
+otu_2019 <- otu_table(as.matrix(esv.2019.bin), taxa_are_rows = FALSE)
+samp_2019 <- sample_data(meta.2019.filtered)
+ps_2019 <- phyloseq(otu_2019, samp_2019)
+
+
+### ----- 2020 ----- ###
+# Set rownames for metadata
+rownames(meta.2020.clean) <- meta.2020.clean$SampleID
+
+# Keep only metadata rows that match the cleaned ESV table
+meta.2020.filtered <- meta.2020.clean[rownames(esv.2020.trans.clean), , drop = FALSE]
+
+# Construct phyloseq object
+otu_2020 <- otu_table(as.matrix(esv.2020.trans.clean), taxa_are_rows = FALSE)
+samp_2020 <- sample_data(meta.2020.filtered)
+ps_2020 <- phyloseq(otu_2020, samp_2020)
+
+
+### ----- 2024 ----- ###
+# Get all sample IDs from ESV matrix
+sample_ids_2024 <- rownames(esv.2024.bin)  # e.g., "S115308.1"
+
+# Remove trailing ".1" and leading "S" to get base IDs
+base_ids_2024 <- gsub("\\.1$", "", gsub("^S", "", sample_ids_2024))
+
+# Filter metadata to 2024 and match base IDs
+meta.2024 <- col_data %>%
+  filter(Year == 2024, SampleID %in% base_ids_2024)
+
+# Now reformat SampleID to match rownames in ESV matrix
+meta.2024$SampleID <- paste0("S", meta.2024$SampleID, ".1")
+rownames(meta.2024) <- meta.2024$SampleID
+
+# Final match filter (just in case)
+meta.2024.filtered <- meta.2024[rownames(meta.2024) %in% sample_ids_2024, ]
+
+# Build phyloseq object
+otu_2024 <- otu_table(as.matrix(esv.2024.bin), taxa_are_rows = FALSE)
+samp_2024 <- sample_data(meta.2024.filtered)
+ps_2024 <- phyloseq(otu_2024, samp_2024)
+
+
+# Richness plots
+plot_richness(ps_2019, x = "Species", measures = c("Observed", "Shannon")) +
+  geom_boxplot(alpha = 0.3) + theme_classic() + labs(title = "Alpha Diversity - 2019")
+
+plot_richness(ps_2020, x = "Species", measures = c("Observed", "Shannon")) +
+  geom_boxplot(alpha = 0.3) + theme_classic() + labs(title = "Alpha Diversity - 2020")
+
+plot_richness(ps_2024, x = "Species", measures = c("Observed", "Shannon")) +
+  geom_boxplot(alpha = 0.3) + theme_classic() + labs(title = "Alpha Diversity - 2024")
+```
+
+Alpha Diversity interpretation
+
+2019
+-Observed richness: BCCHs had a wider range of prey types compared to MOCHs.
+-Shannon diversity: BCCHs also showed greater variation in evenness -- some had very diverse and balanced diets, while others were less so
+-Takeaway: In 2019, BCCH diets were slightly more diverse and variable overall than MOCH diets
+
+2020
+-Observed richness: MOCHs trended slightly higher in richness, but both species showed relatively low diversity
+-Shannon diversity: Diets were overall less even (lower shannon values), especially for BCCHs-- some fed mainly on just a few prey types
+-Takeaway: 2020 appears to be a year of low diversity overall - could suggest food scarcity or strong prey preference
+
+2024
+Observed richness: MOCHs had much higher and more variable richness -- some nests had >90 prey types
+Shannon diversity: MOCHs again stood out -- higher evenness and overall dietary diversity compared to BCCHs
+Takeaway: In 2024, MOCH diets were richer and more evenly spread across prey types. BCCHs were more specialized or limited.
+
+### ------- PERMANOVA ------
+```{r}
+## PERMANOVA (adonis2) for Species Effects on Diet Composition (Bray-Curtis)
+
+# ---- 2019 ----
+# Subset metadata to match distance matrix
+meta.2019.sub <- meta.2019[match(rownames(esv.2019.trans), meta.2019$SampleID), ]
+meta.2019.sub <- meta.2019.sub[!is.na(meta.2019.sub$Species), ]
+
+# Subset Bray-Curtis matrix
+bray.2019.mat <- as.matrix(bray.2019)
+bray.2019.filtered <- as.dist(bray.2019.mat[rownames(meta.2019.sub), rownames(meta.2019.sub)])
+
+# Run PERMANOVA
+adonis_2019 <- adonis2(bray.2019.filtered ~ Species, data = meta.2019.sub)
+print(adonis_2019)
+
+
+# ---- 2020 ----
+# Subset metadata for cleaned 2020 data
+meta.2020.sub <- meta.2020.clean[match(rownames(esv.2020.trans.clean), meta.2020.clean$SampleID), ]
+meta.2020.sub <- meta.2020.sub[!is.na(meta.2020.sub$Species), ]
+
+# Subset Bray-Curtis matrix
+bray.2020.mat <- as.matrix(bray.2020)
+bray.2020.filtered <- as.dist(bray.2020.mat[rownames(meta.2020.sub), rownames(meta.2020.sub)])
+
+# Run PERMANOVA
+adonis_2020 <- adonis2(bray.2020.filtered ~ Species, data = meta.2020.sub)
+print(adonis_2020)
+
+# ---- 2024 ----
+# Use already cleaned metadata and ESV matrix
+# meta.2024.filtered and esv.2024.trans should be ready
+
+# Double-check rownames match
+valid_samples_2024 <- intersect(rownames(esv.2024.trans), rownames(meta.2024.filtered))
+
+# Filter to matched rows
+esv.2024.filtered <- esv.2024.trans[valid_samples_2024, ]
+meta.2024.filtered <- meta.2024.filtered[valid_samples_2024, ]
+
+# Drop NAs and ensure ≥2 individuals per species
+meta.2024.sub <- meta.2024.filtered[!is.na(meta.2024.filtered$Species), ]
+meta.2024.sub <- meta.2024.sub[meta.2024.sub$Species %in% names(table(meta.2024.sub$Species))[table(meta.2024.sub$Species) > 1], ]
+
+# Filter ESV matrix accordingly
+esv.2024.sub <- esv.2024.filtered[rownames(meta.2024.sub), ]
+
+# Run Bray-Curtis
+bray.2024.filtered <- vegdist(esv.2024.sub, method = "bray")
+
+# Run PERMANOVA
+adonis_2024 <- adonis2(bray.2024.filtered ~ Species, data = meta.2024.sub)
+
+print(adonis_2019)
+print(adonis_2020)
+print(adonis_2024)
+```
+What does this test do?
+Does diet composition differ between black-capped chickadees and mountain chickadees? It answers this question by using Bray-Curtis distances to compare how different individuals' diets are from each other.
+
+2019 --
+
+p = 0.06 --> almost statistically signficiant but not quite
+-chickadees might have slightly different diets but with weak evidence
+
+2020 --
+- p = 0.011 --> statistically significant
+- chickadee species had meaningfully different diets
+-R^2 = 0.038 --> species explains ~4% of the variation in diet
+
+2024 -- 
+- p = 0.001 --> highly significant difference in diet by species
+- R^2 = 0.052 --> species explains 5.2% of the variation in diet
+
+Across all three years, there’s increasing evidence that black-capped and mountain chickadees differ in what they feed their babies, with the strongest difference in 2024.
+
+### ------- Beta Dispersion -------
+```{r}
+## --- Beta Dispersion and PERMDISP Tests by Species --- ##
+
+# --- 2019 ---
+samples_2019 <- rownames(as.matrix(bray.2019))
+meta.2019.bd <- meta.2019 %>% filter(SampleID %in% samples_2019)
+meta.2019.bd <- meta.2019.bd[match(samples_2019, meta.2019.bd$SampleID), ]
+bd_2019 <- betadisper(bray.2019, meta.2019.bd$Species)
+anova(bd_2019)
+
+# --- 2020 ---
+samples_2020 <- rownames(as.matrix(bray.2020))
+meta.2020.bd <- meta.2020.clean %>% filter(SampleID %in% samples_2020)
+meta.2020.bd <- meta.2020.bd[match(samples_2020, meta.2020.bd$SampleID), ]
+bd_2020 <- betadisper(bray.2020, meta.2020.bd$Species)
+anova(bd_2020)
+
+# 2024
+
+
+meta.2024 <- col_data %>% filter(Year == 2024)
+
+#  Format SampleIDs to match ESV table (add leading "S" if missing)
+meta.2024$SampleID <- ifelse(grepl("^S", meta.2024$SampleID),
+                             meta.2024$SampleID,
+                             paste0("S", meta.2024$SampleID))
+
+#  Append ".1" to match esv.2024.bin/bray.2024 rownames
+meta.2024$SampleID <- paste0(meta.2024$SampleID, ".1")
+rownames(meta.2024) <- meta.2024$SampleID
+
+# 4. Remove NAs in Species
+meta.2024.bd <- meta.2024[!is.na(meta.2024$Species), ]
+
+#  Filter out species with only 1 individual
+valid_species <- names(which(table(meta.2024.bd$Species) > 1))
+meta.2024.bd <- meta.2024.bd[meta.2024.bd$Species %in% valid_species, ]
+
+# Intersect with Bray-Curtis distance matrix
+shared_ids <- intersect(rownames(as.matrix(bray.2024)), rownames(meta.2024.bd))
+meta.2024.bd <- meta.2024.bd[shared_ids, ]
+
+# Subset Bray-Curtis matrix
+bray.2024.sub <- as.matrix(bray.2024)[shared_ids, shared_ids]
+bray.2024.dist <- as.dist(bray.2024.sub)
+
+# ---- Run betadisper ----
+bd_2024 <- betadisper(bray.2024.dist, meta.2024.bd$Species)
+anova(bd_2024)
+
+
+```
+This analysis is asking: Do black-capped and mountain chickadees differ in how variable their diets are from individual to individual within each species?
+
+2019
+-there is marginal diff in dispersion btwn species
+-one species might have had slightly more variable diets but it isn't significant
+
+2020
+-there is no difference at all in the variability between species
+
+2024
+-no evidence for species differences in beta dispersion
+
+### ------- Diet Composition by Species only 2024-------
+```{r}
+esv.2024.with.meta <- esv.2024.trans
+esv.2024.with.meta$Species <- meta.2024$Species[match(rownames(esv.2024.trans), meta.2024$SampleID)]
+
+mean_by_species_2024 <- esv.2024.with.meta %>%
+  group_by(Species) %>%
+  summarise(across(where(is.numeric), mean)) %>%
+  pivot_longer(-Species, names_to = "ESV", values_to = "Mean_Abundance") %>%
+  filter(Mean_Abundance > 0.01)  # adjust threshold if needed
+
+head(mean_by_species_2024)
+
+write.csv(mean_by_species_2024, "mean_by_species_2024.csv", row.names = FALSE)
+
+```
+### ------- Richness by Elevation Models -------
+```{r}
+# Calculate richness per sample
+# ---- Match metadata rows to ESVs before calculating richness ----
+
+# 2019
+meta.2019 <- meta.2019[rownames(esv.2019.bin), , drop = FALSE]
+meta.2019$Richness <- rowSums(esv.2019.bin)
+
+# 2020
+meta.2020.clean <- meta.2020.clean[rownames(esv.2020.trans.clean), , drop = FALSE]
+meta.2020.clean$Richness <- rowSums(esv.2020.bin[rownames(esv.2020.trans.clean), ])
+
+# 2024
+meta.2024 <- meta.2024[rownames(esv.2024.bin), , drop = FALSE]
+meta.2024$Richness <- rowSums(esv.2024.bin)
+
+# ---- Models ----
+
+mod_2019 <- lm(Richness ~ Elevation + Species, data = meta.2019)
+mod_2020 <- lm(Richness ~ Elevation + Species, data = meta.2020.clean)
+mod_2024 <- lm(Richness ~ Elevation + Species, data = meta.2024)
+
+summary(mod_2019)
+summary(mod_2020)
+summary(mod_2024)
+
+```
+2019
+-no significant effects of elevation or species
+
+2020
+-no significant effects but a marginal trend... higher elevation was associated with slightly greated richness (p=0.1, not significant)
+
+2024
+-neither variable was significant
+## Reflection Questions
+
+Species Differences in Diet
+Across the three years, which year showed the clearest difference in diet between mountain and black-capped chickadees?
+
+What might explain why the differences were stronger that year?
+
+In 2024, MOCHs had diets that were more clustered together, while BCCHs were more spread out.
+What might this suggest about their foraging behavior or specialization?
+
+In the alpha diversity results, MOCHs had higher richness and evenness in 2024.
+Why do you think MOCHs might be eating more different kinds of prey than BCCHs?
+
+
+Effects of Elevation and Year
+There was a weak trend that higher elevation was associated with more prey types in some years.
+
+What ecological reasons might explain this?
+
+Do you think year-to-year variation (like 2020 vs 2024) is mostly due to environmental changes (like weather, prey availability), or something about the birds themselves? Why?
+
+Methodology and Interpretation
+The PERMANOVA showed a significant difference in species diets in 2024, but low R² values (only ~5%). 
+
+How would you explain to someone what it means when a result is significant but explains only a small amount of the variation?
+
+The beta dispersion test looked at how variable diets were within species, but found no significant differences.
+
+What might be the value of doing this test anyway?
+
+Connecting to Your Own Project
+Based on these analyses, are you more interested in:
+
+How different species feed (species-level comparison)?
+
+How diets change by elevation?
+
+How diets vary across years?
+
+Or how individuals within a species vary?
+
+Is there another variable (like nestling mass, lay date, or habitat type) you’d want to explore in relation to diet? What would you predict?
+
+What new hypothesis could you test using these same methods (trees, NMDS, richness models, etc.)?

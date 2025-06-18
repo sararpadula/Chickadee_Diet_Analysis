@@ -1,0 +1,285 @@
+---
+title: "Module 2"
+author: "Sara Padula"
+date: "2025-05-23"
+output: html_document
+---
+## Project Goals
+-Import, clean, and organize chickadee fecal metabarcoding data from 2019, 2020, and 2024
+-Create phyloseq objects that link DNA-based diet data to taxonomy and sample metadata
+-Convert diet data to presence/absence matrices for analyses of dietary richness and overlap
+-Visualize where samples were collected and examine how sample numbers break down by species and year
+
+## Import and Clean Metabarcoding Data
+
+Here we load all necessary input data for fecal sample-based diet analyses. These include:
+-Chickadee metadata (master_data)
+-Sample metadata (coldata)
+-Taxonomy tabls and ESV (extact sequence variant) abundance data from fecal metabarcoding for 2019 and 2020
+```{r import-metabarcoding}
+#load libraries
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(tibble)
+library(phyloseq)
+
+
+
+# Load metadata and ESV data
+chickadee     <- read.csv('master_data.csv')
+sampleID      <- read.csv("ColData.csv", header = T, check.names = F)
+esv           <- read.csv("ESV_long.csv", header = T, check.names = FALSE)
+ESV.2019      <- read.csv("ESV_Long_2019_Ind.csv", header = T, check.names = FALSE)
+ESV.2020      <- read.csv("ESV_Long_2020_Ind.csv", header = T, check.names = FALSE)
+col.data      <- read.csv("ColData.csv")
+row.data.2019 <- read.csv("RowData_2019.csv")
+row.data.2020 <- read.csv("RowData_2020.csv")
+
+# Load 2024 data
+esv_2024 <- read.csv("JVB4821-ArthCOI-read-data.csv", header = TRUE, check.names = FALSE)
+taxonomy_2024 <- read.csv("JVB4821-ArthCOI-esv-data.csv", header = TRUE)
+
+# Transpose and binarize 2024 ESV data
+sample_cols_2024 <- grep("^S", names(esv_2024), value = TRUE)
+esv_2024_transposed <- setNames(data.frame(t(esv_2024[, sample_cols_2024])), esv_2024$ESVId)
+rownames(esv_2024_transposed) <- sample_cols_2024
+esv_2024_binary <- esv_2024_transposed
+esv_2024_binary[esv_2024_binary > 0] <- 1
+
+# Subset coldata to just 2024 samples
+coldata_2024 <- subset(sampleID, grepl("^S", SampleID))
+
+#Format ESV tables: make ESV ID the row name and convert to matrix
+
+ESV.2019 <- ESV.2019 %>% column_to_rownames("ESV") %>% as.matrix()
+ESV.2020      <- ESV.2020 %>% column_to_rownames("ESV") %>% as.matrix()
+
+#Make taxonomy tables: ensure unique row names for each ESV
+row.data.2019 <- row.data.2019 %>%
+  distinct(Query, .keep_all = TRUE) %>%
+  column_to_rownames("Query") %>%
+  as.matrix()
+
+row.data.2020 <- row.data.2020 %>%
+  mutate(Query = make.unique(as.character(Query))) %>%
+  column_to_rownames("Query") %>%
+  as.matrix()
+
+#Format sample metadata for use in phyloseq
+
+col.data      <- col.data %>% column_to_rownames("SampleID")
+
+#Create phyloseq-compatable components
+samples   <- sample_data(col.data)
+OTU.2019  <- otu_table(ESV.2019, taxa_are_rows = TRUE)
+TAX.2019  <- tax_table(row.data.2019)
+OTU.2020  <- otu_table(ESV.2020, taxa_are_rows = TRUE)
+TAX.2020  <- tax_table(row.data.2020)
+
+#Fix sample naming issues in 2020 ESV matrix
+sample_names(OTU.2020) <- sample_names(OTU.2020) %>%
+  gsub("^X", "", .) %>%
+  gsub("\\.", "-", .)
+
+#Remove row labeled "Sum" that is not a real sample
+OTU.2020 <- prune_samples(sample_names(OTU.2020) != "Sum", OTU.2020)
+
+
+```
+
+## Create Phyloseq Objects
+Now we create phyoseq objects for each year. These combine the ESV counts, taxonomy and sample metadata into one unified structure for downstream ecological analyses.
+
+```{r create-phyloseq}
+chickadee.diet.2019 <- phyloseq(OTU.2019, TAX.2019, samples)
+chickadee.diet.2020 <- phyloseq(OTU.2020, TAX.2020, samples)
+
+```
+## Binary Matrices: Presence/Absence of Diet Items
+We will also convert ESV count tables into binary matrices (1 = detected, 0 = not detected) to look at diet breadth and overlap without considering how many reads were recovered.
+
+```{r}
+# Transpose ESV tables: now rows = samples, cols = taxa
+esv.long.2019 <- t(ESV.2019)
+
+# Convert to binary: any detection becomes 1
+esv.long_bin.2019 <- esv.long.2019
+esv.long_bin.2019[esv.long_bin.2019 > 0] <- 1
+
+esv.long.2020 <- t(ESV.2020)
+esv.long_bin.2020 <- esv.long.2020
+esv.long_bin.2020[esv.long_bin.2020 > 0] <- 1
+
+
+```
+
+Fecal Sample Map
+
+This map shows where fecal samples were collected, grouped by species. It's useful for identifying geographic patterns in sampling that might explain dietary variation.
+
+```{r, make sample map and figure out where samples are coming from, how they break down by year}
+
+library(ggmap)
+library(dplyr)
+
+# Register your Google Maps API key
+register_google(key = "AIzaSyCWzA4n4xK412hVo9WezJFaZibVm3KpleM")
+
+head(chickadee)
+
+# Generate a requested bounding box with some padding
+bbox <- make_bbox(lon = long, lat = lat, data = chickadee, f = 0.1)
+
+# Download the map
+chickadeemap <- get_map(location = bbox, maptype = "satellite", source = "google", color = "bw")
+
+# Extract actual bounding box used by Google
+actual_bbox <- attr(chickadeemap, "bb")
+
+# Filter chickadee data to only include points within that bounding box
+chickadee_filtered <- chickadee %>%
+  filter(lat >= actual_bbox$ll.lat,
+         lat <= actual_bbox$ur.lat,
+         long >= actual_bbox$ll.lon,
+         long <= actual_bbox$ur.lon)
+
+# Plot the filtered points
+map.samples_species <- ggmap(chickadeemap) + 
+  geom_point(data = chickadee_filtered, 
+             aes(x = long, y = lat, fill = species), 
+             size = 5, alpha = 0.7, shape = 21) +
+  scale_fill_manual(values = c("rosybrown2", "cornflowerblue")) +
+  labs(x = "Longitude", y = "Latitude", fill = "Species")
+
+# Display the map
+map.samples_species
+
+
+
+```
+
+
+## Study Summary Stats
+
+This gives us a big-picture look at how our samples break down across species and years. This context is critical before comparing diets.
+```{r summary, include=TRUE}
+
+#Preview the metadata
+head(chickadee)
+str(chickadee)
+
+#Count nests per species
+chickadee %>% 
+  group_by(species) %>% 
+  tally()
+
+#Count nests per year
+chickadee %>% 
+  group_by(year) %>% 
+  tally()
+
+#Count nests per species per year
+chickadee %>% 
+  group_by(year, species) %>% 
+  tally()
+
+
+#Repeat the same summary using sample metadata
+col.data %>% 
+  group_by(Year, Species) %>% 
+  tally()
+
+
+col.data %>% 
+  group_by(Species) %>% 
+  tally()
+
+```
+
+Fecal sample counts
+
+Before analyzing diet composition, it's helpful to know how many fecal samples we have for each group. This helps gauge statistical power and ensures we're comparing like with like.
+
+```{r fecal sample summary}
+
+# Total number of fecal samples collected per species in 2019
+chickadee %>% 
+  group_by(species) %>% 
+  filter(year == "2019") %>%
+  summarize(fecal_samples = sum(num_fecal, na.rm = TRUE))
+
+# Total number in 2020
+chickadee %>% 
+  group_by(species) %>% 
+  filter(year == "2020") %>%
+  summarize(fecal_samples = sum(num_fecal, na.rm = TRUE))
+
+# Total number in 2024
+chickadee %>% 
+  group_by(species) %>% 
+  filter(year == "2024") %>%
+  summarize(fecal_samples = sum(num_fecal, na.rm = TRUE))
+
+```
+
+
+
+Reflection questions:
+1. How might differences in sampling location, year, or species identity influence the diet data we will eventually analyze?
+Consider environmental factors (e.g., elevation, temperature, habitat) and whether sampling was evenly distributed.
+
+2. Why is it useful to convert diet data from read counts to presence/absence format for some analyses? What kinds of questions might each format help answer?
+Think about the difference between detecting a food item and quantifying how much of it was eaten.
+
+3.How do the beak differences you observed in Module 1 help you generate hypotheses about which insects might appear more frequently in one species’ diet than the other?
+Try to connect morphology (e.g., deeper vs. longer beaks) to feeding strategies.
+
+## Load 2024 Diet Data
+
+```{r load-2024-data}
+esv_2024 <- read.csv("JVB4821-ArthCOI-read-data.csv", header = TRUE, check.names = FALSE)
+taxonomy_2024 <- read.csv("JVB4821-ArthCOI-esv-data.csv", header = TRUE)
+```
+
+## Transpose and Process 2024 Data
+
+```{r process-2024-data}
+sample_cols_2024 <- grep("^S", names(esv_2024), value = TRUE)
+esv_2024_transposed <- setNames(data.frame(t(esv_2024[, sample_cols_2024])), esv_2024$ESVId)
+rownames(esv_2024_transposed) <- sample_cols_2024
+
+esv_2024_binary <- esv_2024_transposed
+esv_2024_binary[esv_2024_binary > 0] <- 1
+```
+
+## Merge Taxonomy with 2024 Data
+
+```{r merge-taxonomy-2024}
+taxonomy_unique_2024 <- taxonomy_2024[!duplicated(taxonomy_2024$ESVId), ]
+esv_2024_binary$SampleID <- rownames(esv_2024_binary)
+esv_2024_long <- reshape2::melt(esv_2024_binary, id.vars = "SampleID", variable.name = "ESVId", value.name = "Presence")
+esv_2024_merged <- merge(esv_2024_long, taxonomy_unique_2024, by = "ESVId")
+esv_2024_present <- subset(esv_2024_merged, Presence == 1)
+```
+
+## Summary of 2024 Diet
+
+```{r summary-2024}
+library(dplyr)
+
+# Richness per sample
+richness_2024 <- esv_2024_present %>%
+  group_by(SampleID) %>%
+  summarize(Richness = n_distinct(ESVId))
+
+# Most frequent taxa
+top_taxa_2024 <- esv_2024_present %>%
+  group_by(Order) %>%
+  summarize(Frequency = n()) %>%
+  arrange(desc(Frequency)) %>%
+  head(10)
+
+print(richness_2024)
+print(top_taxa_2024)
+```

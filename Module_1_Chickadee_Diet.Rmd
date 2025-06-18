@@ -1,0 +1,143 @@
+---
+title: "Module 1 -- Chickadee Beak Morphometrics"
+author: "Sara Padula"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project Goals
+-Import and clean bill morphology data from chickadees
+-Compare beak traits between black-capped (BCCH) and mountain (MOCH) chickadees
+-Visualize differences in culmen length, depth, and width
+-Use PCA to summarize multivariate variation in beak morphology
+
+## Load Libraries
+These packages help with data cleaning, plotting, statistical tests, and ordination (PCA)
+```{r}
+library(ggmap)
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggfortify)
+library(plotly)
+library(lme4)
+library(vegan)
+library(metacoder)
+library(ape)
+library(ggfortify)
+library(plotly)
+library(tibble)
+```
+
+## Import and Clean Bill Morphology Data
+Here we import the CSV file and convert key columns (culmen length, depth, width) to numeric. If any rows have missing or invalid values, we remove them to avoid problems in our analysis.
+```{r import-bill-data}
+bill.adults <- read.csv("BirdsBanded.csv", header = T)
+
+#Convert the culmen measurements to numeric and remove rows with missing values
+
+bill.adults <- bill.adults %>%
+  mutate(across(
+    c(Culmen..mm., Culmen.Depth..mm., Culmen.Width..mm.),
+    ~ as.numeric(.)
+  )) %>%
+  drop_na(Culmen..mm., Culmen.Depth..mm., Culmen.Width..mm.)
+
+# exclude hybrids for now to focus on clear species differences
+
+bill.adults.2 <- bill.adults %>% filter(Species != 'HYBRID')
+```
+
+## PCA and Morphometrics
+We use PCA (Principal Component Analysis) to reduce the 3 beak traits into two axes that explain most of the variation. This helps us visualize how the species differ overall.
+```{r pca-and-morphology}
+
+#PCA on the 3 numeric columns (26-28 are the column positions)
+pca_bills <- prcomp(bill.adults[26:28], scale. = TRUE)
+
+
+# Plot PCA with loadings (arrows show how traits contribute to axes)
+p <- autoplot(pca_bills, data = bill.adults, colour = 'Species', 
+              loadings = TRUE, loadings.label = TRUE, frame = TRUE, 
+              loadings.label.size = 3) +
+  scale_color_manual(values = c("rosybrown2", "purple", "cornflowerblue")) +
+  theme_classic()
+
+#Make the PCA interactive
+ggplotly(p)
+```
+In this PCA:
+- PC1 (x-axis) is mostly driven by culmen length and width
+- PC2 (y-axis) separates birds based on culmen depth
+- BCCH and MOCH cluster separately, suggesting distinct beak morphologies. 
+
+## Visualize morphological relationships
+We now plot the relationship between different bill traits to compare how species differ in beak shape.
+
+```{r}
+
+#Plot depth vs. length
+
+ggplot(bill.adults, aes(x = Culmen..mm., y = Culmen.Depth..mm., color = Species)) +
+  geom_jitter() + geom_smooth(method = lm) +
+  scale_color_manual(values = c("rosybrown2", "purple", "cornflowerblue")) +
+  theme_classic()
+
+#Plot width vs. length
+ggplot(bill.adults, aes(x = Culmen..mm., y = Culmen.Width..mm., color = Species)) +
+  geom_jitter() + geom_smooth(method = lm) +
+  scale_color_manual(values = c("rosybrown2", "purple", "cornflowerblue")) +
+  theme_classic()
+
+```
+Interpretation
+-MOCH beaks get slightly shallower as they get longer, while BCCH get slightly deeper. This suggests different beak shapes -- not just size differences.
+-Both species show a strong positive relationship between beak length and width, but MOCH generally have wider beaks than BCCH for a given length.
+
+#Statistical Tests
+Now we test whether the average culmen measurements are significantly different between species (excluding hybrids)
+```{r}
+
+lapply(c("Culmen..mm.", "Culmen.Depth..mm.", "Culmen.Width..mm."), function(var) {
+  t.test(as.formula(paste(var, "~ Species")), data = bill.adults.2)
+})
+
+```
+Summary of t-test results:
+-Culmen length: MOCH much longer than BCCH (p < 0.001)
+-Culmen depth: BCCH deeper than MOCH (p < 0.001)
+-Culmen width: MOCH wider than BCCH (p < 0.001)
+
+The two species differ significantly in all three traits.
+
+#Summary statistics by species
+This gives means and standard deviations for each trait per species.
+
+```{r}
+bill.adults.2 %>%
+  group_by(Species) %>%
+  summarize(across(c(Culmen..mm., Culmen.Depth..mm., Culmen.Width..mm.),
+                   list(mean = ~mean(., na.rm = TRUE), sd = ~sd(., na.rm = TRUE)),
+                   .names = "{.col}_{.fn}"),
+            .groups = 'drop')
+```
+
+This table will be useful for reporting actual trait values in a figure caption or results paragraph.
+
+
+## REFLECTION QUESTIONS
+1. How might the observed differences in beak length, depth, and width between mountain and black-capped chickadees influence the types or sizes of insect prey they are best adapted to capture and consume during the breeding season?
+Consider: Does a longer, narrower bill allow access to different microhabitats (e.g., bark crevices)? Does a deeper bill suggest stronger bite force for harder-bodied prey?
+
+
+2.How could beak morphology help you form hypotheses about what dietary differences you expect to observe in your fecal metabarcoding results?
+
+Use the morphology data to generate predictions. For example, "I expect MOCH to consume more large-bodied beetles or larvae than BCCH due to their longer and wider bills."
+
+

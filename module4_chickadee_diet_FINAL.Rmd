@@ -1,0 +1,249 @@
+---
+title: "Module 4: Fitness and Conservation"
+author: "Sara Padula"
+date: "2025-06-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project Goals
+
+- Visualize how diets differ between mountain and black-capped chickadees, and across elevation.
+- Relate diet to reproductive outcomes.
+- Explore conservation implications of diet patterns.
+
+## Load Libraries
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(vegan)
+library(ggpubr)
+library(readr)
+```
+
+## Load and Process Diet Data from All Years
+
+```{r}
+# Load metadata and taxonomy
+library(readr)
+taxonomy <- read_csv("JVB4821-ArthCOI-esv-data.csv")
+
+col_data <- read.csv("ColData.csv")
+master_data <- read.csv("master_data.csv")
+
+# Load ESV data
+esv_2019 <- read.csv("ESV_Long_2019_Ind.csv", check.names = FALSE)
+esv_2020 <- read.csv("ESV_Long_2020_Ind.csv", check.names = FALSE)
+esv_2024 <- read.csv("JVB4821-ArthCOI-read-data.csv", check.names = FALSE)
+
+# Ensure proper column names
+colnames(esv_2019)[1] <- "ESVId"
+colnames(esv_2020)[1] <- "ESVId"
+colnames(esv_2024) <- gsub("\\.1$", "", colnames(esv_2024))
+
+# Get 2024 sample columns
+sample_cols_2024 <- grep("^S\\d+", colnames(esv_2024), value = TRUE)
+
+# Calculate richness
+process_long_esv <- function(df, id_col) {
+  df_long <- df %>%
+    pivot_longer(cols = -!!sym(id_col), names_to = "SampleID", values_to = "count") %>%
+    filter(count > 0) %>%
+    group_by(SampleID) %>%
+    summarise(diet_richness = n_distinct(!!sym(id_col)), .groups = "drop")
+  return(df_long)
+}
+
+rich_2019 <- process_long_esv(esv_2019, "ESVId")
+rich_2020 <- process_long_esv(esv_2020, "ESVId")
+rich_2024 <- colSums(esv_2024[, sample_cols_2024] > 0)
+r_df_2024 <- data.frame(SampleID = names(rich_2024), diet_richness = as.numeric(rich_2024))
+
+# Combine
+richness_all <- bind_rows(rich_2019, rich_2020, r_df_2024)
+richness_data <- left_join(col_data, richness_all, by = "SampleID")
+```
+
+## Richness Visualizations
+
+```{r}
+richness_data_clean <- richness_data %>%
+  filter(!is.na(diet_richness), !is.na(Elevation), !is.na(Species))
+
+p1 <- ggplot(richness_data_clean, aes(x = Species, y = diet_richness, fill = Species)) +
+  geom_boxplot() +
+  labs(title = "Diet Richness by Species", y = "# of Unique Prey Items") +
+  theme_minimal()
+
+p2 <- ggplot(richness_data_clean, aes(x = Elevation, y = diet_richness, color = Species)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Diet Richness Across Elevation", y = "Diet Richness") +
+  theme_minimal()
+
+ggarrange(p1, p2, ncol = 2)
+```
+Left plot
+-MOCH have a wider range of diet richness than BCCH
+-MOCH tend to eat a larger number of unique prey items than BCCH on average
+-Some MOCH individuals had especially high richness, while BCCH richness was more tightly clustered around lower values
+
+Right plot
+-for both species diet richness generally increases with elevation
+-MOCH show a stronger upward trend meaning they tend to eat more kinds of prey as elevation increases
+-BCCH are mostly found at lower elevations and show a weaker trend
+
+
+## Insect Family Composition from All Years
+
+```{r}
+longify_taxa <- function(df, id_col) {
+  df_long <- df %>%
+    pivot_longer(cols = -!!sym(id_col), names_to = "SampleID", values_to = "count") %>%
+    filter(count > 0)
+  return(df_long)
+}
+
+long_2019 <- longify_taxa(esv_2019, "ESVId")
+long_2020 <- longify_taxa(esv_2020, "ESVId")
+long_2024 <- esv_2024 %>%
+  select(ESVId, all_of(sample_cols_2024)) %>%
+  pivot_longer(cols = starts_with("S"), names_to = "SampleID", values_to = "count") %>%
+  filter(count > 0)
+
+all_taxa <- bind_rows(long_2019, long_2020, long_2024) %>%
+  left_join(taxonomy[, c("ESVId", "Family")], by = "ESVId") %>%
+  left_join(col_data, by = "SampleID") %>%
+  filter(!is.na(Family), !is.na(Species))
+
+top_families <- all_taxa %>%
+  group_by(Family) %>%
+  summarise(total = sum(count), .groups = "drop") %>%
+  slice_max(order_by = total, n = 20) %>%
+  pull(Family)
+
+filtered_taxa <- all_taxa %>%
+  filter(Family %in% top_families) %>%
+  group_by(Species, Family) %>%
+  summarise(total = sum(count), .groups = "drop") %>%
+  group_by(Species) %>%
+  mutate(prop = total / sum(total))
+
+ggplot(filtered_taxa, aes(x = reorder(Family, -prop), y = prop, fill = Species)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Top 20 Insect Families by Proportional Abundance", y = "Proportion", x = "Family") +
+  theme_minimal()
+```
+We are showing the top most common insect families found in the chickadee diet across all years
+
+Key takeaways
+-Noctuidae (moth family) was the most dominant food source for both BCCH and MOCH
+-Pollenidae and Aphididae (flies and aphids) were also important for BCCH but less so for MOCH
+-MOCH had higher proportions of Tortricidae (leafroller moths) and Philodromidae (running crab spiders)
+-some insect families (linyphiidae, cerambycidae) were only found in MOCH diets, suggesting more dietary diversity or specialization at high elevations
+
+## Model Diet and Reproductive Metrics (2019–2020 only)
+
+```{r}
+rich_2020 <- rich_2020 %>%
+  filter(!grepl("Sum", SampleID))  # removes the summary row
+
+# (You can do the same for rich_2019 if needed)
+
+
+# Join diet richness to metadata using SampleID
+model_data <- left_join(col_data, bind_rows(rich_2019, rich_2020), by = "SampleID")
+
+# Join reproductive success data based on NestID (individuals → nest-level metadata)
+model_data <- left_join(model_data, master_data, by = c("NestID" = "id"))
+
+fitness_data_clean <- model_data %>%
+  filter(!is.na(avg_tarsus), !is.na(diet_richness), !is.na(Species), !is.na(Elevation))
+
+if (nrow(fitness_data_clean) > 0) {
+  fitness_data_clean$Species <- as.factor(fitness_data_clean$Species)
+
+  lm1 <- lm(avg_tarsus ~ diet_richness + Species + Elevation, data = fitness_data_clean)
+  print(summary(lm1))
+
+  lm2 <- lm(num_nestlings ~ diet_richness + Species + Elevation, data = fitness_data_clean)
+  print(summary(lm2))
+} else {
+  message("No complete 2019–2020 data available for modeling.")
+}
+```
+
+```{r}
+## Model Diet and Reproductive Metrics (2024 only)
+
+# Format 2024 NestIDs to match master_data (drop the middle digit)
+model_data_2024 <- col_data %>%
+  filter(Year == 2024) %>%
+  mutate(NestID_clean = gsub("^(\\d+)-\\d+-2024$", "\\1-2024", NestID)) %>%
+  left_join(r_df_2024, by = "SampleID") %>%
+  left_join(master_data, by = c("NestID_clean" = "id"))
+
+# Filter for complete data
+fitness_data_2024 <- model_data_2024 %>%
+  filter(!is.na(avg_tarsus), !is.na(diet_richness), !is.na(Species), !is.na(Elevation))
+
+# Run models
+if (nrow(fitness_data_2024) > 0) {
+  fitness_data_2024$Species <- as.factor(fitness_data_2024$Species)
+
+  lm1_2024 <- lm(avg_tarsus ~ diet_richness + Species + Elevation, data = fitness_data_2024)
+  print(summary(lm1_2024))
+
+  lm2_2024 <- lm(num_nestlings ~ diet_richness + Species + Elevation, data = fitness_data_2024)
+  print(summary(lm2_2024))
+} else {
+  message("No complete 2024 data available for modeling.")
+}
+
+
+```
+
+
+## Conservation Metric: Invasive Species (2024 only)
+
+```{r}
+invasive_list <- c("Harmonia axyridis", "Coccinella septempunctata")
+invasive_ids <- taxonomy %>% filter(Species %in% invasive_list) %>% pull(ESVId)
+esv_2024 <- esv_2024[, !is.na(names(esv_2024)) & names(esv_2024) != ""]
+
+
+inv_counts <- esv_2024 %>%
+  filter(ESVId %in% invasive_ids) %>%
+  select(ESVId, all_of(sample_cols_2024)) %>%
+  pivot_longer(cols = -ESVId, names_to = "SampleID", values_to = "count") %>%
+  filter(count > 0) %>%
+  group_by(SampleID) %>%
+  summarise(invasive_count = n())
+
+inv_data <- left_join(col_data, inv_counts, by = "SampleID")
+inv_data$invasive_count[is.na(inv_data$invasive_count)] <- 0
+
+ggplot(inv_data, aes(x = Species, y = invasive_count, fill = Species)) +
+  geom_boxplot() +
+  labs(title = "Invasive Prey in Diet by Species", y = "# Invasive Prey Items") +
+  theme_minimal()
+```
+
+## Reflection Questions
+
+- How do diets differ in diversity and taxonomic composition between BCCH and MOCH?
+- Are chickadees consuming invasive species more in certain habitats?
+- Does higher diet richness correlate with better reproductive outcomes?
+
+## Suggested Readings
+
+- Grabenstein et al. (2022). Urban-rural gradients and chickadee diet.
+- Norris et al. (2022). Insect availability and fecundity in montane birds.
+- Trevelline et al. (2018). Nestling provisioning and niche separation.
+
